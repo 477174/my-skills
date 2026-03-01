@@ -196,6 +196,8 @@ Without this, `host.docker.internal` will not resolve inside the container on Li
 
 **Rationale**: Shared databases mean all worktrees see the same data. This is usually desired (test the same dataset across branches). If you need per-branch database isolation, duplicate the database service into each worktree's compose file instead.
 
+**Restart policy (MANDATORY)**: Every service in `docker-compose.infra.yml` must declare `restart: unless-stopped`. Infra services are shared across all worktrees and expected to be always available. Without a restart policy, a host reboot leaves them dead — and the `infra` Makefile target's readiness loop hangs indefinitely waiting for a container that will never start. No worktree owns these services, so no `make dev` invocation will recover them automatically.
+
 ### 6. Dependency Hash Auto-Rebuild
 
 Detect when dependency files change and automatically rebuild containers:
@@ -360,6 +362,7 @@ networks:
 services:
   db:
     image: postgres:16-alpine  # CUSTOMIZE: database image
+    restart: unless-stopped
     environment:
       POSTGRES_USER: user      # CUSTOMIZE
       POSTGRES_PASSWORD: pass   # CUSTOMIZE
@@ -373,6 +376,7 @@ services:
 
   cache:
     image: redis:7-alpine  # CUSTOMIZE: cache image
+    restart: unless-stopped
     ports:
       - "6379:6379"  # CUSTOMIZE
     networks:
@@ -517,6 +521,12 @@ Frontend (Vite + React), API (Express), Worker (Bull queue processor). Redis sha
 Developer already has `main` running. Creates `git worktree add ../project-hotfix hotfix/urgent`. Runs `make dev` in the new worktree. Port hashing produces a different offset (different `CURDIR`). Collision detection confirms ports are free. Nginx gets a second vhost. Both branches now accessible via separate nip.io hostnames simultaneously.
 
 ## Troubleshooting
+
+### Infra Containers Dead After Host Reboot
+
+**Symptom**: `make dev` hangs at "Waiting for Cassandra..." (or similar readiness check) indefinitely.
+**Cause**: Shared infrastructure containers exited during a host reboot or Docker daemon restart. Without `restart: unless-stopped`, Docker leaves them in `Exited (255)` state. The `infra` target's readiness loop polls a dead container forever. Additionally, `docker compose up -d` fails to recreate containers when a dead container with the same `container_name` already exists.
+**Fix**: Add `restart: unless-stopped` to every service in `docker-compose.infra.yml`. For immediate recovery: `docker rm <dead-container-name> && docker compose -f docker-compose.infra.yml up -d`.
 
 ### Port Collision
 
