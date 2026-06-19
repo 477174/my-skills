@@ -1,0 +1,19 @@
+# --- Docker multi-worktree dev (append to your .gitignore) -------------------
+# Auto-generated per-worktree state, recreated on every `make dev`.
+.deps-hash
+.dev-urls
+
+# Secrets and per-host artifacts — never commit.
+.env
+api/.env
+.env.local
+.env.*.local
+api/.env.bak*
+.env.bak*
+
+# Local-only build-egress override (see docker-compose.override.yml template).
+docker-compose.override.yml
+
+# Installed deps (masked by anon volumes in containers).
+node_modules
+.venv

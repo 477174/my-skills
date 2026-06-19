@@ -1,0 +1,146 @@
+# ==============================================================================
+# Per-Worktree Application Services (Development)
+# ==============================================================================
+# Each worktree gets isolated app containers via COMPOSE_PROJECT_NAME.
+# Shared infra (DB/cache) lives in docker-compose.infra.yml.
+#
+# Two networks (see reference/networking.md):
+#   shared   (external) — services that reach shared infra or host.docker.internal
+#   internal (private)  — per-worktree broker/cache; keeps their service-name
+#                         DNS unambiguous so worktree A never resolves
+#                         "broker" to worktree B's container.
+# ==============================================================================
+
+# Belt-and-suspenders project naming (Makefile also exports this).
+name: ${COMPOSE_PROJECT_NAME:-my-project-app-dev}
+
+services:
+  # === Frontend (per-worktree) ===============================================
+  frontend:
+    build:
+      context: .
+      dockerfile: front/Dockerfile          # CUSTOMIZE
+      target: development                    # CUSTOMIZE
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"        # CUSTOMIZE internal port
+    environment:
+      - NODE_ENV=development
+      # Wire dynamic host/port into the dev server (see vite snippet).
+      - VITE_ALLOWED_HOST=${FRONTEND_HOST:-localhost}
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
+      - VITE_API_PROXY_TARGET=${VITE_API_PROXY_TARGET:-http://api:8000}
+      # HMR via bind mount on Linux needs polling — inotify doesn't cross it.
+      - VITE_USE_POLLING=${VITE_USE_POLLING:-true}
+    volumes:
+      - ./front:/app/front                   # CUSTOMIZE source path
+      # Masking volumes: keep the image's installed deps from being shadowed
+      # by the host bind mount. Without these a fresh checkout starts with
+      # missing/foreign node_modules. `make dev -V` refreshes them on dep change.
+      - /app/node_modules
+      - /app/front/node_modules
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux: required for loopback
+    networks:
+      - shared
+
+  # === Message broker (per-worktree, isolated) ===============================
+  # CUSTOMIZE/REMOVE. On `internal` so its service-name DNS can't collide with
+  # another worktree's broker. Only the mgmt UI is published, bound to loopback.
+  broker:
+    image: rabbitmq:3.13-management-alpine    # CUSTOMIZE
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BROKER_MGMT_PORT:-15672}:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=app
+      - RABBITMQ_DEFAULT_PASS=${BROKER_PASSWORD:-dev_password}
+    volumes:
+      - broker-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - internal
+
+  # === API (per-worktree) ====================================================
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile              # CUSTOMIZE
+      target: development                     # CUSTOMIZE
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"              # CUSTOMIZE internal port
+    env_file:
+      - ./api/.env                            # CUSTOMIZE (gitignored; see .env.example)
+    environment:
+      # CUSTOMIZE: point at the shared infra service name (NOT localhost).
+      - DATABASE_URL=postgresql://app:dev_password@db:5432/app
+      - BROKER_URL=amqp://app:${BROKER_PASSWORD:-dev_password}@broker:5672/
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      # SINGLE $ — Compose substitutes it. A double $$ would pass the literal
+      # string and break OAuth redirect URLs built from APP_URL.
+      - APP_URL=http://${API_HOST:-localhost:8000}
+    volumes:
+      - ./api/app:/app/app:ro                 # read-only source (hot-reload watches it)
+      - ./api/.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      broker:
+        condition: service_healthy            # don't start before the broker is up
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - shared      # reach shared DB + host.docker.internal
+      - internal    # reach the per-worktree broker
+
+  # === Worker (per-worktree) =================================================
+  # CUSTOMIZE/REMOVE. Heartbeat healthcheck: the worker touches
+  # /tmp/worker.heartbeat each loop; the check fails if it goes stale.
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+      target: development
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]   # CUSTOMIZE
+    env_file:
+      - ./api/.env
+    environment:
+      - DATABASE_URL=postgresql://app:dev_password@db:5432/app
+      - BROKER_URL=amqp://app:${BROKER_PASSWORD:-dev_password}@broker:5672/
+    volumes:
+      - ./api/app:/app/app:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /tmp/worker.heartbeat ] && [ \"$$(($$(date +%s) - $$(cat /tmp/worker.heartbeat)))\" -lt 60 ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s                    # let in-flight jobs drain
+    networks:
+      - shared
+      - internal
+
+networks:
+  shared:
+    name: ${SHARED_NETWORK_NAME:-my-project-shared}
+    external: true
+  internal:
+
+volumes:
+  broker-data:

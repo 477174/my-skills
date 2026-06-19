@@ -1,0 +1,23 @@
+# ==============================================================================
+# Local build override (OPTIONAL, gitignored) — fast build-time egress
+# ==============================================================================
+# Some hosts have poor egress on Docker's default bridge network, so dependency
+# installs (uv sync / bun install / npm ci) stall or time out downloading larger
+# packages, while the host network fetches them in seconds. `build.network: host`
+# routes only the BUILD steps through the host network. Runtime networking is
+# unaffected. docker compose (and `make dev`) auto-load this file.
+#
+# Keep it gitignored and local-only. Add one entry per service that builds.
+# Remove it once the host's Docker bridge egress is fixed.
+# ==============================================================================
+
+services:
+  frontend:
+    build:
+      network: host
+  api:
+    build:
+      network: host
+  worker:
+    build:
+      network: host

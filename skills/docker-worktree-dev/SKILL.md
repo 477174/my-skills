@@ -1,633 +1,215 @@
 ---
 name: docker-worktree-dev
-description: Multi-worktree Docker dev environment setup with automatic port isolation, nip.io hostname routing, shared infrastructure, and nginx reverse proxy. Use when setting up isolated Docker dev branches, creating worktree port allocation, configuring nip.io hostnames for dev, or handling container-to-container nip.io loopback issues. Trigger phrases include 'multi-worktree docker', 'worktree dev environment', 'docker port hashing', 'nip.io setup', 'dev environment per branch', 'docker branch isolation', 'worktree make dev'. Do NOT use for production deployment, CI/CD, or Kubernetes.
+description: Scaffolds a multi-worktree Docker development environment from tested templates — deterministic port allocation, nip.io hostname routing, shared infrastructure with pinned project name, two-network isolation, host nginx reverse proxy, dependency-hash rebuilds, and AI-tool URL injection. Use when setting up isolated Docker dev environments per git branch/worktree, creating a Makefile for worktree port allocation, configuring nip.io hostnames, fixing container-to-container nip.io loopback, or sharing a database across worktrees. Trigger phrases include 'multi-worktree docker', 'worktree dev environment', 'docker port hashing', 'nip.io setup', 'dev environment per branch', 'make dev worktree'. Not for production deployment, CI/CD, or Kubernetes.
 ---
 
 # Docker Multi-Worktree Dev Environment
 
-Run multiple git worktree branches simultaneously with isolated Docker containers, unique ports, and nip.io hostnames.
+Run many git worktree branches at once with isolated containers, unique ports,
+nip.io hostnames, and one shared database. This skill ships **tested template
+files** in `templates/`; the workflow is copy-then-customize, not
+generate-from-scratch — that is what makes the first `make dev` work and keeps
+every project on the same battle-tested base instead of rediscovering fixes.
 
-## When to Use This
+## When to use
 
-- Setting up dev environments where multiple branches must run simultaneously
-- Need per-branch port isolation combined with hostname routing
-- Docker Compose projects with shared databases across branches
-- Container-to-container calls through nip.io URLs
-- Any project that uses `git worktree` and Docker Compose together
+- Multiple branches must run simultaneously with per-branch isolation.
+- A Docker Compose project where databases/caches are shared across branches.
+- Container-to-container or cross-stack calls through nip.io URLs.
+- Any project combining `git worktree` with Docker Compose.
 
-## When NOT to Use This
+## When NOT to use
 
-- Production deployment, CI/CD pipelines, or Kubernetes orchestration
-- Single-developer projects that never run multiple branches simultaneously
-- Projects without Docker Compose
-- Environments where hostname-based routing is unnecessary (single service)
+- Production deployment, CI/CD pipelines, or Kubernetes.
+- Single-branch projects that never run two worktrees at once.
+- Projects without Docker Compose, or where hostname routing adds nothing.
+
+## Files in this skill
+
+```
+docker-worktree-dev/
+├── SKILL.md                      # this overview + workflow
+├── templates/                    # COPY these into the target project
+│   ├── Makefile
+│   ├── docker-compose.yml        # per-worktree app services (two networks)
+│   ├── docker-compose.infra.yml  # shared DB/cache (pinned project name)
+│   ├── docker-compose.override.yml  # optional build-egress fix (gitignored)
+│   ├── nginx-vhost.conf          # annotated reference vhost
+│   ├── vite.config.snippet.ts    # wires Makefile env into the dev server
+│   ├── gitignore.snippet
+│   └── ai-instructions.snippet.md
+├── scripts/
+│   ├── resolve_loopback_url.py   # nip.io loopback → host.docker.internal
+│   └── check_host_deps.sh        # preflight: docker/nginx/ss/nip.io
+└── reference/                    # read on demand
+    ├── infrastructure.md         # sharing, naming, volumes, healthchecks, .env
+    ├── networking.md             # two networks, nip.io, loopback, cross-stack
+    ├── port-allocation.md        # hash + probe algorithm, limits
+    └── troubleshooting.md        # symptom → cause → fix
+```
 
 ## Prerequisites
 
-- **git worktree**: For creating isolated working directories per branch
-- **Docker + Docker Compose**: Container orchestration (v2+ recommended)
-- **nginx**: Host-level reverse proxy for hostname routing
-- **nip.io**: Wildcard DNS service (or manual `/etc/hosts` entries)
-- **Linux**: `ss` command for port detection (adapt for macOS with `lsof`)
+git worktree · Docker + Compose v2 · host nginx · nip.io (or `/etc/hosts`) ·
+Linux `ss` (adapt to `lsof` on macOS). Run `scripts/check_host_deps.sh` to
+verify before the first `make dev`.
 
-## Performance Notes
+Quality over speed: get each subsystem (infra, ports, networking, nginx,
+loopback) working independently before declaring success.
 
-Take your time implementing this. Quality over speed. Do not skip validation steps. Verify port allocation, nginx routing, and container connectivity before declaring success. Each subsystem (ports, hostnames, nginx, loopback) must work independently before combining.
+## Setup workflow
 
-## Core Concepts
+Copy this checklist and work through it; details are in `reference/`.
 
-- **Git worktrees** create isolated working directories — each worktree is a full checkout at a different branch, sharing the same `.git` object store
-- **Each worktree gets unique port offsets** via a deterministic hash of its directory path, ensuring no collisions between simultaneously running branches
-- **nip.io provides wildcard DNS routing** — any subdomain of `<ip>.nip.io` resolves to that IP, eliminating manual `/etc/hosts` management
-- **nginx on the host proxies by hostname** — a vhost per worktree routes `project-branch-service.<ip>.nip.io` to the correct `localhost:<port>`
-- **Databases are shared across worktrees** via a separate infrastructure compose file and external Docker network — avoids data duplication and keeps migrations consistent
-- **App servers are isolated per worktree** — each branch gets its own frontend, API, worker, and message broker containers
-- **Loopback fallback is required** for container-to-container nip.io calls — inside a container, nip.io resolves to `127.0.0.1` (the container itself), so outbound calls must be rewritten to `host.docker.internal`
+```
+Setup progress:
+- [ ] Step 1: Preflight host deps
+- [ ] Step 2: Copy template files
+- [ ] Step 3: Customize naming + services
+- [ ] Step 4: Wire the frontend dev server
+- [ ] Step 5: Bootstrap .env and .gitignore
+- [ ] Step 6: Implement the loopback fallback (if needed)
+- [ ] Step 7: Inject dev URLs into AI instructions
+- [ ] Step 8: First run and verify
+```
 
-## Instructions
+### Step 1 — Preflight host deps
 
-### 1. Branch Name Sanitization
+Run `bash scripts/check_host_deps.sh`. Fix every MISS before continuing
+(missing nginx `sites-enabled` include and blocked nip.io are the usual ones).
 
-Normalize the branch name for Docker-safe usage (compose project names, container names, network aliases):
+### Step 2 — Copy template files
+
+Copy into the project root: `Makefile`, `docker-compose.yml`,
+`docker-compose.infra.yml`. Copy `docker-compose.override.yml` only if the host
+has slow Docker-bridge build egress (see reference/infrastructure.md).
+
+### Step 3 — Customize naming and services
+
+Edit only the `CUSTOMIZE` markers.
+
+- **Makefile:** set `PROJECT_SLUG`; confirm `INFRA_READY_CONTAINER` matches the
+  infra `container_name`; replace the infra readiness probe with a real one
+  (`pg_isready` / `cqlsh` / `redis-cli ping`); add/remove per-service port
+  bases (each base in the probe loop needs a matching `export <SERVICE>_PORT`)
+  and the matching hostnames.
+- **docker-compose.yml:** set each service's build context/target, internal
+  ports, env, and source mount. Keep the **two networks**: `shared` (external)
+  for anything reaching the shared DB or `host.docker.internal`; `internal`
+  (private) for the per-worktree broker/cache so their service-name DNS can't
+  collide with another worktree. Keep the masking volumes
+  (`/app/node_modules`, `/app/.venv`, …), healthchecks,
+  `depends_on: service_healthy`, and `extra_hosts`.
+- **docker-compose.infra.yml:** set the DB/cache image and credentials; keep the
+  stable `container_name`, `restart: unless-stopped`, and healthcheck. Decide
+  share-vs-isolate per service (reference/infrastructure.md).
+
+Do **not** remove these load-bearing fixes (each maps to a past production bug —
+see reference/ for the why):
+
+| Keep | Why |
+|------|-----|
+| Pinned `-p <slug>-infra` in `make infra` | else every worktree gets its own DB |
+| Sanitized `COMPOSE_PROJECT_NAME` | paths with uppercase break compose names |
+| Two-network topology | else service-name DNS collides across worktrees |
+| Masking volumes on bind mounts | else fresh checkout has no node_modules |
+| `restart: unless-stopped` on infra | else reboot hangs `make infra` forever |
+| `--remove-orphans` + volume reclaim in `down` | rename safety + disk bloat |
+| `APP_URL=...${API_HOST}` single `$` | `$$` breaks OAuth redirects |
+| nginx `client_max_body_size` + timeouts | uploads (413) and SSE streams |
+
+### Step 4 — Wire the frontend dev server
+
+Merge `templates/vite.config.snippet.ts` (`allowedHosts`, `/api` proxy with
+`ws: true`, `watch.usePolling`) into the project's `vite.config.ts`, or apply
+the equivalent for your framework. Without this the Makefile's exported
+`VITE_*` vars wire to nothing: the host is rejected, the proxy is dead, HMR is
+silent. (See reference/networking.md and reference/infrastructure.md.)
+
+### Step 5 — Bootstrap .env and .gitignore
+
+Append `templates/gitignore.snippet` to `.gitignore`. If the API uses
+`env_file`, create `api/.env.example` (all keys, safe dev defaults) and
+`cp api/.env.example api/.env`. Never commit `.env` or
+`docker-compose.override.yml`.
+
+### Step 6 — Implement the loopback fallback (if needed)
+
+If any container calls another container/stack through a nip.io URL, route those
+calls through `scripts/resolve_loopback_url.py` (or port its logic) and keep
+`extra_hosts: ["host.docker.internal:host-gateway"]` on the service. For a
+second compose stack, reach it via `host.docker.internal:<published-port>` and
+keep any shared issuer/URL byte-for-byte identical across stacks
+(reference/networking.md).
+
+### Step 7 — Inject dev URLs into AI instructions
+
+`make dev` writes `.dev-urls` (and `make ports` prints them). Paste
+`templates/ai-instructions.snippet.md` into the project's `CLAUDE.md` /
+`AGENTS.md` / `.cursorrules` so AI tools read the real per-worktree URLs instead
+of guessing `localhost:PORT`.
+
+### Step 8 — First run and verify
 
 ```bash
-# Convert branch name to Docker-safe format
-BRANCH_SAFE=$(echo "${BRANCH}" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')
+make infra      # one shared infra stack (pinned project), waits for readiness
+make dev        # this worktree: build/up, nginx vhost, .dev-urls
+make ports      # confirm host + nip.io URLs
 ```
 
-Rules: lowercase only, hyphens for separators, strip all characters except `[a-z0-9-]`. Slashes (from `feature/xyz` branches) become hyphens.
-
-### 2. Port Allocation Algorithm
-
-The core algorithm hashes the worktree directory path to produce a deterministic port offset, then performs linear probing to avoid collisions with already-bound ports.
-
-```makefile
-# CUSTOMIZE: Define your service ports (base_port + offset for each)
-# Add or remove port checks based on your services
-_PORT_OFFSET := $(shell \
-	pref=$$(( $$(printf '%s' "$(CURDIR)" | cksum | cut -d' ' -f1 | head -c4) % 100 )); \
-	used=$$(ss -tln 2>/dev/null); \
-	for i in $$(seq 0 99); do \
-		o=$$(( (pref + i) % 100 )); \
-		fp=$$(( 3000 + o )); ap=$$(( 8000 + o )); \
-		if ! echo "$$used" | grep -qE ":$$fp\s" \
-		&& ! echo "$$used" | grep -qE ":$$ap\s"; then \
-			echo $$o; exit 0; \
-		fi; \
-	done; \
-	echo $$pref)
-
-# CUSTOMIZE: Export one variable per service port
-# Add more exports for additional services (e.g., message brokers, admin panels)
-export FRONTEND_PORT := $(shell echo $$(( 3000 + $(_PORT_OFFSET) )))
-export API_PORT      := $(shell echo $$(( 8000 + $(_PORT_OFFSET) )))
-```
-
-**How it works:**
-
-1. `cksum` hashes the full `$(CURDIR)` path — same directory always produces same initial preference
-2. `% 100` constrains to offset range 0–99, giving port ranges like 3000–3099 and 8000–8099
-3. `ss -tln` captures all currently listening TCP ports
-4. Linear probing: if preferred offset is taken, try `(pref + 1) % 100`, `(pref + 2) % 100`, etc.
-5. Maximum 100 probes before falling back to original preference
-6. **Recommended base ranges**: 3000–3099 (frontend), 8000–8099 (API), 5672–5771 (AMQP), 15672–15771 (management UIs)
-
-**To add more services**, add additional port checks in the `if` block and export lines. For example, adding a message broker:
-
-```makefile
-# Inside the collision check, add:
-rp=$$(( 5672 + o )); rmp=$$(( 15672 + o )); \
-# ... && ! echo "$$used" | grep -qE ":$$rp\s" \
-# ... && ! echo "$$used" | grep -qE ":$$rmp\s"; then \
-
-# Additional exports:
-export BROKER_PORT     := $(shell echo $$(( 5672 + $(_PORT_OFFSET) )))
-export BROKER_MGMT_PORT := $(shell echo $$(( 15672 + $(_PORT_OFFSET) )))
-```
-
-### 3. nip.io Hostname Pattern
-
-Generate predictable, human-readable hostnames per worktree per service:
-
-```makefile
-# Derive compose project name from parent directory + worktree name
-PARENT_DIR := $(notdir $(patsubst %/,%,$(dir $(CURDIR))))
-export COMPOSE_PROJECT_NAME := $(PARENT_DIR)-$(notdir $(CURDIR))
-
-# Detect server IP (handles WSL vs native Linux)
-SERVER_IP := $(shell grep -q microsoft /proc/version 2>/dev/null \
-	&& echo 127.0.0.1 \
-	|| ip route get 1.1.1.1 2>/dev/null | awk '{print $$7; exit}')
-
-# CUSTOMIZE: One hostname per service
-export FRONTEND_HOST := $(COMPOSE_PROJECT_NAME)-frontend.$(SERVER_IP).nip.io
-export API_HOST      := $(COMPOSE_PROJECT_NAME)-api.$(SERVER_IP).nip.io
-```
-
-**Result**: A worktree at `/code/myproject/feature-auth` produces hostnames like `myproject-feature-auth-frontend.192.168.1.50.nip.io`.
-
-### 4. nip.io Loopback Fallback (CRITICAL)
-
-**Problem**: nip.io resolves to the embedded IP (e.g., `127.0.0.1`). Inside a Docker container, `127.0.0.1` means the container itself — not the host. Any container-to-container HTTP call through a nip.io URL will fail silently or connect to the wrong service.
-
-**Language-agnostic pseudocode:**
-
-```
-function resolve_loopback_url(url):
-    hostname = parse_url(url).hostname
-    resolved_ip = dns_resolve(hostname)
-    if is_loopback(resolved_ip):
-        new_url = replace_hostname(url, "host.docker.internal")
-        original_host = hostname  # preserve for Host header
-        return new_url, original_host
-    return url, null
-```
-
-**Python implementation:**
-
-```python
-import ipaddress
-import socket
-from urllib.parse import urlparse, urlunparse
-
-
-def resolve_loopback_url(url: str) -> tuple[str, str | None]:
-    """Detect nip.io loopback and reroute through Docker host gateway.
-
-    Returns (possibly_rewritten_url, original_netloc_or_none).
-    When original_netloc is not None, pass it as the Host header.
-    """
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if not hostname:
-        return url, None
-    try:
-        resolved_ip = socket.gethostbyname(hostname)
-        if ipaddress.ip_address(resolved_ip).is_loopback:
-            docker_host = parsed._replace(
-                netloc=parsed.netloc.replace(hostname, "host.docker.internal")
-            )
-            return urlunparse(docker_host), parsed.netloc
-    except socket.gaierror:
-        pass
-    return url, None
-```
-
-**REQUIREMENT**: Add `extra_hosts` to every service in `docker-compose.yml` that makes outbound HTTP calls through nip.io URLs:
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
-
-Without this, `host.docker.internal` will not resolve inside the container on Linux. This is automatic on Docker Desktop for macOS/Windows but **must be explicit on Linux**.
-
-### 5. Shared vs Per-Worktree Infrastructure
-
-**SHARE across all worktrees** (via a separate `docker-compose.infra.yml`):
-- **Databases**: PostgreSQL, MySQL, Cassandra, MongoDB — avoids data duplication, keeps migrations consistent
-- **Caches**: Redis, Memcached — shared session stores and caching layers
-
-**ISOLATE per worktree** (in each worktree's `docker-compose.yml`):
-- **App servers**: Frontend, API, GraphQL — branch-specific code changes
-- **Message brokers**: RabbitMQ, Kafka — prevent cross-contamination of queues
-- **Workers**: Background job processors — must run branch-specific code
-- **Frontends**: Dev servers — each branch has its own UI
-
-**Rationale**: Shared databases mean all worktrees see the same data. This is usually desired (test the same dataset across branches). If you need per-branch database isolation, duplicate the database service into each worktree's compose file instead.
-
-**Restart policy (MANDATORY)**: Every service in `docker-compose.infra.yml` must declare `restart: unless-stopped`. Infra services are shared across all worktrees and expected to be always available. Without a restart policy, a host reboot leaves them dead — and the `infra` Makefile target's readiness loop hangs indefinitely waiting for a container that will never start. No worktree owns these services, so no `make dev` invocation will recover them automatically.
-
-### 6. Dependency Hash Auto-Rebuild
-
-Detect when dependency files change and automatically rebuild containers:
-
-```makefile
-DEPS_HASH_FILE := .deps-hash
-
-# CUSTOMIZE: List your dependency/lock files
-DEPS_FILES := front/package.json api/pyproject.toml $(wildcard front/bun.lock front/yarn.lock api/uv.lock api/poetry.lock)
-CURRENT_DEPS_HASH := $(shell cat $(DEPS_FILES) 2>/dev/null | md5sum | cut -d' ' -f1)
-STORED_DEPS_HASH  := $(shell cat $(DEPS_HASH_FILE) 2>/dev/null)
-```
-
-In the `dev` target, compare hashes and rebuild if different:
-
-```makefile
-dev:
-	@if [ "$(CURRENT_DEPS_HASH)" != "$(STORED_DEPS_HASH)" ]; then \
-		echo "Dependencies changed, rebuilding..."; \
-		docker compose up -d --build -V; \
-		echo "$(CURRENT_DEPS_HASH)" > $(DEPS_HASH_FILE); \
-	else \
-		docker compose up -d; \
-	fi
-```
-
-The `-V` flag recreates anonymous volumes, ensuring fresh `node_modules` or `.venv` directories inside containers.
-
-### 7. AI Tool Context Injection
-
-**Problem**: AI coding tools (Claude Code, OpenCode, Cursor, GitHub Copilot, etc.) have no way to discover the development URLs for your worktree. When asked to test the frontend, browse the API, or run integration tests, they guess `localhost:3000` or `localhost:8000` — which is wrong in multi-worktree setups where URLs are dynamic nip.io hostnames like `myproject-feature-auth-frontend.192.168.1.50.nip.io`.
-
-**Solution**: The Makefile already computes the correct hostnames and ports. Add 2 lines to the `dev` target to write them to a `.dev-urls` file, and 1 line to the `down` target to clean it up. Then reference this file in your project's AI instruction files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, etc.). AI tools read these files at startup and will use the correct URLs every time.
-
-**Why this works**: AI tools are designed to read project instruction files for context. If those files say "read `.dev-urls` for the correct development URLs", the AI uses the right hostnames automatically — no guessing, no hardcoding, works across all worktrees and all developers.
-
-**Implementation**:
-
-In your Makefile `dev` target, after the nginx reload and URL echo lines (around line 302), add:
-
-```makefile
-	@printf '# Auto-generated by make dev — do not edit\nFRONTEND_URL=http://$(FRONTEND_HOST)\nAPI_URL=http://$(API_HOST)\nAPI_DOCS=http://$(API_HOST)/docs\n' > .dev-urls
-```
-
-In your Makefile `down` target (around line 307), add:
-
-```makefile
-	@rm -f .dev-urls
-```
-
-Then, in your project's AI instruction file (e.g., `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, or `.github/copilot-instructions.md`), add:
-
-```markdown
-## Development URLs
-
-When the Docker dev environment is running (`make dev`), the actual URLs
-for this worktree are written to `.dev-urls`. Always read this file for
-the correct frontend and API URLs. Never guess localhost:PORT.
-
-Example:
-```
-cat .dev-urls
-# FRONTEND_URL=http://myproject-feature-auth-frontend.192.168.1.50.nip.io
-# API_URL=http://myproject-feature-auth-api.192.168.1.50.nip.io
-# API_DOCS=http://myproject-feature-auth-api.192.168.1.50.nip.io/docs
-```
-```
-
-This approach works for all AI tools that read project instruction files:
-- **Claude Code / OpenCode**: Read `CLAUDE.md` or `AGENTS.md`
-- **Cursor**: Reads `.cursorrules`
-- **GitHub Copilot**: Reads `.github/copilot-instructions.md`
-- **Any custom tool**: Can be configured to read any instruction file
-
-The `.dev-urls` file is generated fresh every time `make dev` runs, so it always reflects the current worktree's actual URLs.
-
-## Templates
-
-### Makefile Template
-
-```makefile
-# === Port Allocation ===
-# CUSTOMIZE: Add/remove port checks for your services
-_PORT_OFFSET := $(shell \
-	pref=$$(( $$(printf '%s' "$(CURDIR)" | cksum | cut -d' ' -f1 | head -c4) % 100 )); \
-	used=$$(ss -tln 2>/dev/null); \
-	for i in $$(seq 0 99); do \
-		o=$$(( (pref + i) % 100 )); \
-		fp=$$(( 3000 + o )); ap=$$(( 8000 + o )); \
-		if ! echo "$$used" | grep -qE ":$$fp\s" \
-		&& ! echo "$$used" | grep -qE ":$$ap\s"; then \
-			echo $$o; exit 0; \
-		fi; \
-	done; \
-	echo $$pref)
-
-# CUSTOMIZE: One export per service port
-export FRONTEND_PORT := $(shell echo $$(( 3000 + $(_PORT_OFFSET) )))
-export API_PORT      := $(shell echo $$(( 8000 + $(_PORT_OFFSET) )))
-
-# === Project Naming ===
-PARENT_DIR := $(notdir $(patsubst %/,%,$(dir $(CURDIR))))
-export COMPOSE_PROJECT_NAME := $(PARENT_DIR)-$(notdir $(CURDIR))
-
-# === Hostname Generation ===
-SERVER_IP := $(shell grep -q microsoft /proc/version 2>/dev/null \
-	&& echo 127.0.0.1 \
-	|| ip route get 1.1.1.1 2>/dev/null | awk '{print $$7; exit}')
-
-# CUSTOMIZE: One hostname per service
-export FRONTEND_HOST := $(COMPOSE_PROJECT_NAME)-frontend.$(SERVER_IP).nip.io
-export API_HOST      := $(COMPOSE_PROJECT_NAME)-api.$(SERVER_IP).nip.io
-
-# === Shared Network ===
-# CUSTOMIZE: Network name shared across all worktrees
-SHARED_NETWORK_NAME := my-project-shared
-export SHARED_NETWORK_NAME
-
-# === Dependency Hash ===
-DEPS_HASH_FILE := .deps-hash
-# CUSTOMIZE: Your dependency/lock files
-DEPS_FILES := front/package.json api/pyproject.toml $(wildcard front/bun.lock api/uv.lock)
-CURRENT_DEPS_HASH := $(shell cat $(DEPS_FILES) 2>/dev/null | md5sum | cut -d' ' -f1)
-STORED_DEPS_HASH  := $(shell cat $(DEPS_HASH_FILE) 2>/dev/null)
-
-# === Targets ===
-
-.PHONY: dev down status infra
-
-infra:
-	@docker network inspect $(SHARED_NETWORK_NAME) >/dev/null 2>&1 \
-		|| docker network create $(SHARED_NETWORK_NAME)
-	docker compose -f docker-compose.infra.yml up -d
-
-dev: infra
-	@if [ "$(CURRENT_DEPS_HASH)" != "$(STORED_DEPS_HASH)" ]; then \
-		echo "Dependencies changed, rebuilding with -V..."; \
-		docker compose up -d --build -V; \
-		echo "$(CURRENT_DEPS_HASH)" > $(DEPS_HASH_FILE); \
-	else \
-		docker compose up -d; \
-	fi
-	@# Generate nginx vhost
-	@printf 'server {\n\tlisten 80;\n\tserver_name $(FRONTEND_HOST);\n\tlocation / {\n\t\tproxy_pass http://127.0.0.1:$(FRONTEND_PORT);\n\t\tproxy_http_version 1.1;\n\t\tproxy_set_header Host $$host;\n\t\tproxy_set_header Upgrade $$http_upgrade;\n\t\tproxy_set_header Connection "upgrade";\n\t}\n}\nserver {\n\tlisten 80;\n\tserver_name $(API_HOST);\n\tlocation / {\n\t\tproxy_pass http://127.0.0.1:$(API_PORT);\n\t\tproxy_http_version 1.1;\n\t\tproxy_set_header Host $$host;\n\t\tproxy_set_header Upgrade $$http_upgrade;\n\t\tproxy_set_header Connection "upgrade";\n\t}\n}\n' \
-		| sudo tee /etc/nginx/sites-enabled/$(COMPOSE_PROJECT_NAME) > /dev/null
-	@sudo nginx -t && sudo nginx -s reload
-	@printf '# Auto-generated by make dev — do not edit\nFRONTEND_URL=http://$(FRONTEND_HOST)\nAPI_URL=http://$(API_HOST)\nAPI_DOCS=http://$(API_HOST)/docs\n' > .dev-urls
-	@echo ""
-	@echo "Frontend: http://$(FRONTEND_HOST)"
-	@echo "API:      http://$(API_HOST)"
-	@echo ""
-
-down:
-	docker compose down
-	@rm -f .dev-urls
-	@sudo rm -f /etc/nginx/sites-enabled/$(COMPOSE_PROJECT_NAME)
-	@sudo nginx -t 2>/dev/null && sudo nginx -s reload
-
-status:
-	@echo "Project: $(COMPOSE_PROJECT_NAME)"
-	@echo "Frontend: http://$(FRONTEND_HOST) (port $(FRONTEND_PORT))"
-	@echo "API:      http://$(API_HOST) (port $(API_PORT))"
-	@docker compose ps
-```
-
-### docker-compose.yml Template
-
-```yaml
-# CUSTOMIZE: Define your application services
-services:
-  frontend:
-    build:
-      context: ./front
-      target: development  # CUSTOMIZE: Dockerfile target
-    ports:
-      - "${FRONTEND_PORT:-3000}:3000"  # CUSTOMIZE: internal port
-    environment:
-      - API_URL=http://${API_HOST}  # CUSTOMIZE: env vars for your framework
-      - VITE_USE_POLLING=true  # Enable polling for HMR in Docker on Linux
-    volumes:
-      - ./front:/app  # CUSTOMIZE: source mount path
-    networks:
-      - ${SHARED_NETWORK_NAME}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  api:
-    build:
-      context: ./api
-      target: development  # CUSTOMIZE: Dockerfile target
-    ports:
-      - "${API_PORT:-8000}:8000"  # CUSTOMIZE: internal port
-    environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/mydb  # CUSTOMIZE
-      - CORS_ORIGINS=http://${FRONTEND_HOST:-localhost:3000}  # CUSTOMIZE
-      - APP_URL=http://$${API_HOST:-localhost:8000}
-    volumes:
-      - ./api:/app  # CUSTOMIZE: source mount path
-    networks:
-      - ${SHARED_NETWORK_NAME}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-networks:
-  ${SHARED_NETWORK_NAME}:
-    external: true
-```
-
-### docker-compose.infra.yml Template
-
-```yaml
-# Shared infrastructure — run ONCE, used by ALL worktrees
-# CUSTOMIZE: Add your database and cache services
-services:
-  db:
-    image: postgres:16-alpine  # CUSTOMIZE: database image
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: user      # CUSTOMIZE
-      POSTGRES_PASSWORD: pass   # CUSTOMIZE
-      POSTGRES_DB: mydb         # CUSTOMIZE
-    volumes:
-      - db-data:/var/lib/postgresql/data  # CUSTOMIZE: data path
-    ports:
-      - "5432:5432"  # CUSTOMIZE: expose if needed for local tools
-    networks:
-      - ${SHARED_NETWORK_NAME:-my-project-shared}
-
-  cache:
-    image: redis:7-alpine  # CUSTOMIZE: cache image
-    restart: unless-stopped
-    ports:
-      - "6379:6379"  # CUSTOMIZE
-    networks:
-      - ${SHARED_NETWORK_NAME:-my-project-shared}
-
-volumes:
-  db-data:
-
-networks:
-  ${SHARED_NETWORK_NAME:-my-project-shared}:
-    name: ${SHARED_NETWORK_NAME:-my-project-shared}
-    driver: bridge
-```
-
-### nginx Vhost Template
-
-```nginx
-# CUSTOMIZE: One server block per service per worktree
-server {
-    listen 80;
-    server_name ${SERVICE_HOST};  # CUSTOMIZE: nip.io hostname
-
-    location / {
-        proxy_pass http://127.0.0.1:${SERVICE_PORT};  # CUSTOMIZE: mapped port
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-## Language-Specific Variations
-
-### Python Variation: Stale .venv Guard
-
-When bind-mounting a Python project into a container, the `.venv` directory may contain broken symlinks from a different Python version or architecture. Detect and clean:
+Verify, in order: exactly one shared infra container
+(`docker ps | grep shared`); this worktree on its own `*_internal` network
+(`docker network ls`); the frontend host loads; the API host answers; HMR
+reloads on a source edit; if applicable, a container-to-container nip.io call
+succeeds. Then `make down` cleans containers, anon volumes, and the vhost.
+
+## Lifecycle
 
 ```bash
-# In docker-entrypoint.sh
-if [ -L ".venv/bin/python3" ] && [ ! -x ".venv/bin/python3" ]; then
-    echo "Stale .venv detected (broken symlink), recreating..."
-    rm -rf .venv
-    uv sync
-fi
+git worktree add ../my-project-feature-x feature/x
+cd ../my-project-feature-x
+make infra      # only needed once across all worktrees
+make dev        # prints Frontend/API nip.io URLs; writes .dev-urls
+make ps         # status (worktree + infra)
+make down       # stop + reclaim volumes + remove vhost
+cd ../my-project && git worktree remove ../my-project-feature-x
 ```
 
-### Python Variation: Worker Hot-Reload
+Always `make down` before `git worktree remove`, or orphan containers linger
+(cleanup in reference/troubleshooting.md).
 
-Use `watchfiles` for development hot-reload with a `SERVICE_MODE` conditional:
+## Language-specific notes
+
+- **Python:** in the dev entrypoint, guard a stale bind-mounted `.venv`
+  (`[ -L .venv/bin/python3 ] && [ ! -x .venv/bin/python3 ] && rm -rf .venv && uv sync`).
+  Hot-reload workers with `watchfiles` under a dev conditional.
+- **Node:** Vite needs `allowedHosts` + polling (Step 4). Hot-reload workers
+  with `nodemon`/`tsx --watch` under `NODE_ENV=development`.
+
+## Verifying isolation (quick reference)
 
 ```bash
-# In docker-entrypoint.sh
-if [ "$SERVICE_MODE" = "worker" ]; then
-    if [ "$APP_ENV" = "development" ]; then
-        exec watchfiles "python -m app.workers" app/
-    else
-        exec python -m app.workers
-    fi
-fi
+docker ps --format '{{.Names}}' | grep shared        # exactly one infra stack
+docker network ls | grep internal                    # one per running worktree
+docker ps --format '{{.Names}}' | grep -E 'broker|cache' | sort   # per-worktree
 ```
 
-### Node.js Variation: Vite Dev Server
+Symptom → fix table lives in reference/troubleshooting.md.
 
-Vite requires explicit allowed hosts when accessed via non-localhost hostnames:
+## Caveats and known limits
 
-```yaml
-# In docker-compose.yml, frontend service environment
-environment:
-  - VITE_ALLOWED_HOST=${FRONTEND_HOST:-}
-```
+- `.deps-hash` and `.dev-urls` are generated per worktree — gitignored.
+- nip.io may be blocked by corporate DNS — use `/etc/hosts` or dnsmasq.
+- `extra_hosts` host-gateway is required on Linux (automatic on Docker Desktop).
+- Port offset space is 100 — past ~20 simultaneous worktrees, widen the modulo
+  (reference/port-allocation.md).
+- Shared DB means migration ordering matters across branches — coordinate, or
+  isolate the DB per worktree for heavy schema work.
+- Port allocation has a small TOCTOU window — `make down && make dev` re-checks.
 
-### Node.js Variation: Worker Hot-Reload
+## Iterating on this skill
 
-Use `nodemon` or `tsx --watch` for development:
-
-```bash
-if [ "$NODE_ENV" = "development" ]; then
-    exec npx nodemon --watch src/ --ext ts,js src/worker.ts
-else
-    exec node dist/worker.js
-fi
-```
-
-## Full Lifecycle
-
-### Creating and Running a Worktree
-
-```bash
-# 1. Create worktree for a feature branch
-git worktree add ../my-project-feature-auth feature/auth
-
-# 2. Enter the worktree
-cd ../my-project-feature-auth
-
-# 3. Start shared infrastructure (only needed once across all worktrees)
-make infra
-
-# 4. Start the dev environment
-make dev
-# Output:
-#   Frontend: http://my-project-feature-auth-frontend.192.168.1.50.nip.io
-#   API:      http://my-project-feature-auth-api.192.168.1.50.nip.io
-#
-# A .dev-urls file is also generated for AI tool integration:
-cat .dev-urls
-# FRONTEND_URL=http://my-project-feature-auth-frontend.192.168.1.50.nip.io
-# API_URL=http://my-project-feature-auth-api.192.168.1.50.nip.io
-# API_DOCS=http://my-project-feature-auth-api.192.168.1.50.nip.io/docs
-
-# 5. Check status
-make status
-
-# 6. Stop the environment
-make down
-
-# 7. Clean up worktree when done
-cd ../my-project
-git worktree remove ../my-project-feature-auth
-```
-
-### Garbage Collection (Orphaned Containers)
-
-```bash
-# Find containers from removed worktrees
-docker ps -a --filter "label=com.docker.compose.project" --format "{{.Labels}}" | \
-    grep -oP 'com.docker.compose.project=\K[^,]+' | sort -u
-
-# Remove orphaned project containers
-docker compose -p <orphaned-project-name> down -v
-```
-
-## Examples
-
-### Example 1: Python/FastAPI + PostgreSQL
-
-Two worktrees running simultaneously — `main` on ports 3042/8042 and `feature/payments` on ports 3067/8067. Shared PostgreSQL via `docker-compose.infra.yml`. API calls between services use nip.io hostnames with loopback fallback. Nginx routes both sets of hostnames.
-
-### Example 2: Node.js + Redis + RabbitMQ
-
-Frontend (Vite + React), API (Express), Worker (Bull queue processor). Redis shared via infra compose. RabbitMQ isolated per worktree (ports 5672+offset, 15672+offset). Worker hot-reloads via `nodemon` in development. `VITE_ALLOWED_HOST` set for each worktree's frontend hostname.
-
-### Example 3: Creating a Second Worktree
-
-Developer already has `main` running. Creates `git worktree add ../project-hotfix hotfix/urgent`. Runs `make dev` in the new worktree. Port hashing produces a different offset (different `CURDIR`). Collision detection confirms ports are free. Nginx gets a second vhost. Both branches now accessible via separate nip.io hostnames simultaneously.
-
-## Troubleshooting
-
-### Infra Containers Dead After Host Reboot
-
-**Symptom**: `make dev` hangs at "Waiting for Cassandra..." (or similar readiness check) indefinitely.
-**Cause**: Shared infrastructure containers exited during a host reboot or Docker daemon restart. Without `restart: unless-stopped`, Docker leaves them in `Exited (255)` state. The `infra` target's readiness loop polls a dead container forever. Additionally, `docker compose up -d` fails to recreate containers when a dead container with the same `container_name` already exists.
-**Fix**: Add `restart: unless-stopped` to every service in `docker-compose.infra.yml`. For immediate recovery: `docker rm <dead-container-name> && docker compose -f docker-compose.infra.yml up -d`.
-
-### Port Collision
-
-**Symptom**: `make dev` starts but a service fails to bind its port.
-**Cause**: Another process (not tracked by `ss -tln` at Makefile evaluation time) grabbed the port.
-**Fix**: Run `make down && make dev` to re-evaluate ports. If persistent, check for non-Docker processes on the port range with `ss -tlnp | grep <port>`.
-
-### nip.io Not Resolving Inside Container
-
-**Symptom**: Container HTTP client gets DNS resolution failure or connects to wrong service.
-**Cause**: Missing `extra_hosts` directive; `host.docker.internal` not defined.
-**Fix**: Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the service in `docker-compose.yml`. Ensure the loopback fallback function is implemented in your HTTP client code.
-
-### nginx Not Routing
-
-**Symptom**: Browser shows "502 Bad Gateway" or nginx default page.
-**Cause**: Vhost not generated, nginx not reloaded, or service not yet listening.
-**Fix**: Verify vhost exists: `cat /etc/nginx/sites-enabled/<project-name>`. Test config: `sudo nginx -t`. Reload: `sudo nginx -s reload`. Check service is up: `docker compose ps`.
-
-### Migration Conflicts Between Worktrees
-
-**Symptom**: Database migration fails because another worktree applied a conflicting migration.
-**Cause**: Shared database means all worktrees' migrations apply to the same schema.
-**Fix**: Coordinate migration ordering across branches. For heavy schema changes, consider temporary per-worktree database isolation. Run migrations from only one worktree at a time.
-
-### Stale Containers After Worktree Removal
-
-**Symptom**: `docker ps` shows containers from a branch that no longer exists.
-**Cause**: `make down` was not run before `git worktree remove`.
-**Fix**: `docker compose -p <old-project-name> down -v` to clean up. Add a pre-removal check to your workflow: always `make down` before removing a worktree.
-
-## Caveats and Known Limitations
-
-- **Generated files**: `.deps-hash` and `.dev-urls` are auto-generated by the Makefile and should be added to `.gitignore`. They are recreated on every `make dev` run and contain worktree-specific state.
-- **Vite HMR requires polling in Docker**: On Linux, inotify events don't propagate from host to container through bind mounts. Set `VITE_USE_POLLING=true` (the default in the template) so Vite's chokidar watcher uses polling instead. Without this, file edits are invisible to Vite and HMR won't trigger — changes only appear after container restart.
-- **OAuth redirect URLs must use APP_URL**: If your app has OAuth flows (Facebook, Google, etc.), the callback/redirect URLs are typically built from a base URL config (e.g., `APP_URL`). In Docker, this defaults to `localhost` which breaks OAuth redirects — the provider redirects to `localhost:8000` instead of the nip.io hostname. Fix: pass `APP_URL=http://${API_HOST:-localhost:8000}` in the docker-compose `api` service environment so OAuth callbacks resolve to the correct nip.io URL.
-- **nip.io and corporate DNS**: Some corporate DNS servers block or intercept wildcard DNS services like nip.io. Workaround: use manual `/etc/hosts` entries or a local DNS resolver (e.g., dnsmasq).
-- **extra_hosts Linux-only requirement**: `host.docker.internal:host-gateway` must be explicitly declared on Linux. Docker Desktop on macOS/Windows handles this automatically.
-- **Port range saturation**: With 100 offsets and multiple services per worktree, running more than ~20 simultaneous worktrees risks exhausting the offset space. Increase the modulo (e.g., `% 200`) if needed.
-- **Docker network limit**: Docker has a default limit of ~30 networks. Shared infrastructure mitigates this, but many worktrees with per-worktree networks can hit the limit.
-- **TOCTOU race in port allocation**: The `ss -tln` check happens at Makefile evaluation time. A port can be claimed between evaluation and Docker container startup. This is rare in practice and resolved by re-running `make dev`.
-- **Migration conflicts**: Shared databases mean migration ordering matters across worktrees. Teams should coordinate schema changes or use feature flags instead of schema-breaking migrations.
-
-## References
-
-Patterns in this document were derived from three production implementations: a video editor platform, a real-time chat application, and an e-commerce editor. These are credited here for provenance but are NOT required — all patterns above are fully self-contained and project-agnostic.
+These templates encode fixes from production multi-worktree setups. When a new
+worktree setup surfaces a fresh failure mode, fix it **in `templates/` here**
+(and note the why in `reference/`) so the next project inherits it — rather than
+patching one project's copy and letting the templates drift.

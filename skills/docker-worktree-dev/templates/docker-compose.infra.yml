@@ -1,0 +1,66 @@
+# ==============================================================================
+# Shared Infrastructure (Multi-Worktree)
+# ==============================================================================
+# Run ONCE under a PINNED project name, used by ALL worktrees:
+#   docker compose -f docker-compose.infra.yml -p my-project-infra up -d
+# `make infra` does this for you. Never let COMPOSE_PROJECT_NAME namespace
+# this stack, or each worktree gets its own database.
+#
+# SHARE here: databases, caches (shared dataset across branches).
+# ISOLATE in docker-compose.yml: app servers, brokers, workers (branch code).
+# Need per-branch DB isolation instead? Move the DB into docker-compose.yml.
+# ==============================================================================
+
+services:
+  db:
+    image: postgres:16-alpine                 # CUSTOMIZE
+    # MANDATORY: without a restart policy a host reboot leaves infra Exited,
+    # the `make infra` readiness loop then hangs forever, and `up -d` fails to
+    # recreate a dead container that still owns container_name. No worktree
+    # owns infra, so nothing recovers it automatically.
+    restart: unless-stopped
+    # Stable container_name so the Makefile readiness probe + "already running"
+    # guard can target it. Must equal INFRA_READY_CONTAINER in the Makefile.
+    container_name: my-project-shared-db       # CUSTOMIZE
+    environment:
+      POSTGRES_USER: app                       # CUSTOMIZE
+      POSTGRES_PASSWORD: dev_password          # CUSTOMIZE
+      POSTGRES_DB: app                         # CUSTOMIZE
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # No host port by default — internal Docker network only avoids clashing
+    # with other local DB instances. Expose deliberately if local tools need it.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - shared
+
+  # CUSTOMIZE/REMOVE: shared cache. Decide share-vs-isolate per project — a
+  # shared cache can leak state across branches; if that bites, move it into
+  # docker-compose.yml on the `internal` network instead.
+  cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    container_name: my-project-shared-cache
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - shared
+
+networks:
+  shared:
+    name: ${SHARED_NETWORK_NAME:-my-project-shared}
+    external: true
+
+volumes:
+  db-data:
+    name: my-project-shared-db-data
